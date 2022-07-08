@@ -510,7 +510,7 @@ class ProbeFrame(CNCRibbon.PageFrame):
 		#----------------------------------------------------------------
 		# Center probing
 		#----------------------------------------------------------------
-		lframe = tkExtra.ExLabelFrame(self, text=_("Center"), foreground="DarkBlue")
+		lframe = tkExtra.ExLabelFrame(self, text=_("Probe ring center"), foreground="DarkBlue")
 		lframe.pack(side=TOP, expand=YES, fill=X)
 
 		Label(lframe(), text=_("Diameter:")).pack(side=LEFT)
@@ -531,6 +531,46 @@ class ProbeFrame(CNCRibbon.PageFrame):
 		self.addWidget(b)
 		tkExtra.Balloon.set(b, _("Center probing using a ring"))
 
+		#----------------------------------------------------------------
+		# Peg center probing
+		#----------------------------------------------------------------
+		lframe = tkExtra.ExLabelFrame(self, text=_("Probe peg center"), foreground="DarkBlue")
+		lframe.pack(side=TOP, expand=YES, fill=X)
+
+		row = 0
+
+		Label(lframe(), text=_("Probe distance:")).grid(row=row, column=0, sticky=E)
+
+		self.peg_probe_distance = tkExtra.FloatEntry(lframe(), background=tkExtra.GLOBAL_CONTROL_BACKGROUND)
+		self.peg_probe_distance.grid(row=row, column=1, sticky=EW)
+		tkExtra.Balloon.set(self.peg_probe_distance, _("Probing peg external diameter + tool diameter"))
+		self.addWidget(self.peg_probe_distance)
+
+		row += 1
+		Label(lframe(), text=_("Z retract distance:")).grid(row=row, column=0, sticky=E)
+		self.peg_retract_height = tkExtra.FloatEntry(lframe(), background=tkExtra.GLOBAL_CONTROL_BACKGROUND)
+		self.peg_retract_height.grid(row=row, column=1, sticky=EW)
+		tkExtra.Balloon.set(self.peg_retract_height, _("Retract this much for traveling between probes"))
+		self.addWidget(self.peg_retract_height)
+
+		# ---
+		b = Button(lframe(),
+				image=Utils.icons["target32"],
+				text=_("Center"),
+				compound=TOP,
+				command=self.probePegCenter,
+				width=48,
+				padx=5, pady=0)
+		b.grid(row=0, column=2, rowspan=2, sticky=NSEW)
+		self.addWidget(b)
+		tkExtra.Balloon.set(b, _("Center probing using a peg " \
+						"Jog first the machine to the left of the peg " \
+						"such that it will reach the peg when it moved right. " \
+						"Enter a probe distance at least the diameter of the peg + the diameter of the probing tool." \
+						"Enter a retract height large enough so that if the tool is lifted by this much, it can safely travel over the peg."))
+
+		lframe().grid_columnconfigure(1, weight=1)
+		
 		#----------------------------------------------------------------
 		# Align / Orient / Square ?
 		#----------------------------------------------------------------
@@ -773,7 +813,7 @@ class ProbeFrame(CNCRibbon.PageFrame):
 		self.sendGCode(cmd)
 
 	#-----------------------------------------------------------------------
-	# Probe Center
+	# Probe Center of a ring
 	#-----------------------------------------------------------------------
 	def probeCenter(self, event=None):
 		self.warnMessage()
@@ -809,6 +849,86 @@ class ProbeFrame(CNCRibbon.PageFrame):
 		lines.append("%wait")
 		lines.append("g53 g0 y[0.5*(tmp+prby)]")
 		lines.append("%wait")
+		lines.append("g90")
+		self.app.run(lines=lines)
+
+	#-----------------------------------------------------------------------
+	# Probe Center of a peg
+	#-----------------------------------------------------------------------
+	def probePegCenter(self, event=None):
+		self.warnMessage()
+
+		cmd = "G91 %s F%s"%(CNC.vars["prbcmd"], CNC.vars["prbfeed"])
+
+		try:
+			peg_probe_distance = abs(float(self.peg_probe_distance.get()))
+		except ValueError:
+			peg_probe_distance = 0.0
+
+		if peg_probe_distance < 0.001:
+			tkMessageBox.showerror(_("Probe Peg Center Error"),
+					_("Invalid probe distance entered"),
+					parent=self.winfo_toplevel())
+			return
+
+		try:
+			peg_retract_height = abs(float(self.peg_retract_height.get()))
+		except ValueError:
+			peg_retract_height = 0.0
+
+		if peg_retract_height < 0.001:
+			tkMessageBox.showerror(_("Probe Peg Center Error"),
+					_("Invalid retract height entered"),
+					parent=self.winfo_toplevel())
+			return
+
+		up = "G91 g0 z%g"%(peg_retract_height)
+		down = "G91 g0 z%g"%(-peg_retract_height)
+		xy_retract_distance = peg_probe_distance/10.0
+
+		lines = []
+		# move to the east until probe touches, record X coordinate there 
+		lines.append("%s x%s"%(cmd, peg_probe_distance))
+		lines.append("%wait")
+		lines.append("tmp=prbx")
+
+		# move back a little, then lift up and go over the peg to the opposite side
+		lines.append("G91 g0 x%g"%(-xy_retract_distance))
+		lines.append(up)
+		lines.append("G91 g0 x%g"%(peg_probe_distance+2*xy_retract_distance))
+		lines.append(down)
+
+		# move to the west until probe touches
+		lines.append("%s x%s"%(cmd, -peg_probe_distance))
+		lines.append("%wait")
+		
+		# move back a little, then lift up and go over the peg to the middle south side
+		lines.append("G91 g0 x%g"%(xy_retract_distance))
+		lines.append(up)
+		lines.append("g53 g0 x[0.5*(tmp+prbx)]")
+		lines.append("G91 g0 y%g"%(-peg_probe_distance))
+		lines.append(down)
+
+		# move north until probe touches, record Y coordinate there
+		lines.append("%s y%s"%(cmd, peg_probe_distance))
+		lines.append("%wait")
+		lines.append("tmp=prby")
+
+		# move back a little, then lift up and go over the peg to the opposite side
+		lines.append("G91 g0 y%g"%(-xy_retract_distance))
+		lines.append(up)
+		lines.append("G91 g0 y%g"%(peg_probe_distance*1.2))
+		lines.append(down)
+
+		# move south until probe touches
+		lines.append("%s y%s"%(cmd, -peg_probe_distance))
+		lines.append("%wait")
+
+		# move back a little, then lift probe and move it so it is over the center of the probe
+		lines.append("G91 g0 y%g"%(xy_retract_distance))
+		lines.append(up)
+		lines.append("g53 g0 y[0.5*(tmp+prby)]")
+
 		lines.append("g90")
 		self.app.run(lines=lines)
 
